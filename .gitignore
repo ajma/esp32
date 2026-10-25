@@ -1,0 +1,11 @@
+.DS_Store
+.esphome/
+**/.esphome/
+**/secrets.yaml
+.venv/
+__pycache__/
+*.py[cod]
+*.bin
+*.elf
+kickr-ble-scan.json
+kickr-gatt.json

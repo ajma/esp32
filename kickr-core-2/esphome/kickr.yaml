@@ -1,0 +1,129 @@
+substitutions:
+  name: pain-cave
+  friendly_name: Pain Cave
+  # Replace with the trainer's BLE address from a scanner or ESPHome logs.
+  kickr_mac: "AA:BB:CC:DD:EE:FF"
+
+packages:
+  esphome.bluetooth-proxy: github://esphome/bluetooth-proxies/esp32-generic/esp32-generic-c3.yaml@main
+
+esphome:
+  name: ${name}
+  name_add_mac_suffix: false
+  friendly_name: ${friendly_name}
+  min_version: 2026.10.0
+  includes:
+    - cycling_power.h
+    - heart_rate.h
+  on_boot:
+    priority: -100
+    then:
+      - binary_sensor.template.publish:
+          id: kickr_connected
+          state: false
+
+api:
+  encryption:
+    key: !secret api_encryption_key
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+
+esp32_ble:
+  max_connections: 3
+
+bluetooth_proxy:
+  active: true
+  connection_slots: 2
+
+globals:
+  - id: cadence_decoder
+    type: kickr::Cadence
+    restore_value: no
+
+ble_client:
+  - mac_address: ${kickr_mac}
+    id: kickr_client
+    on_connect:
+      then:
+        - lambda: id(cadence_decoder).reset();
+        - binary_sensor.template.publish:
+            id: kickr_connected
+            state: true
+    on_disconnect:
+      then:
+        - lambda: |-
+            id(cadence_decoder).reset();
+            id(kickr_power).publish_state(NAN);
+            id(kickr_cadence).publish_state(NAN);
+            id(kickr_heart_rate).publish_state(NAN);
+        - binary_sensor.template.publish:
+            id: kickr_connected
+            state: false
+
+binary_sensor:
+  - platform: template
+    id: kickr_connected
+    name: Trainer connected
+    device_class: connectivity
+  - platform: status
+    name: Bridge connected
+
+sensor:
+  # CORE 2 forwards its paired HR monitor through this standard service.
+  - platform: ble_client
+    type: characteristic
+    ble_client_id: kickr_client
+    id: kickr_heart_rate
+    name: Heart rate
+    service_uuid: "180D"
+    characteristic_uuid: "2A37"
+    notify: true
+    update_interval: never
+    unit_of_measurement: bpm
+    icon: mdi:heart-pulse
+    state_class: measurement
+    accuracy_decimals: 0
+    filters:
+      - timeout: 10s
+    lambda: |-
+      return kickr::parse_heart_rate(x.data(), x.size());
+
+  - platform: ble_client
+    type: characteristic
+    ble_client_id: kickr_client
+    id: kickr_power
+    name: Power
+    service_uuid: "1818"
+    characteristic_uuid: "2A63"
+    notify: true
+    update_interval: never
+    unit_of_measurement: W
+    device_class: power
+    state_class: measurement
+    accuracy_decimals: 0
+    filters:
+      - timeout: 10s
+    lambda: |-
+      auto measurement = kickr::parse(x.data(), x.size());
+      if (!measurement.valid) return NAN;
+      const float cadence = id(cadence_decoder).update(measurement, millis());
+      id(kickr_cadence).publish_state(cadence);
+      return measurement.power;
+
+  - platform: template
+    id: kickr_cadence
+    name: Cadence
+    unit_of_measurement: rpm
+    icon: mdi:rotate-right
+    state_class: measurement
+    accuracy_decimals: 0
+    update_interval: never
+    filters:
+      - timeout: 10s
+
+  - platform: wifi_signal
+    name: Wi-Fi signal
+    update_interval: 60s
+    entity_category: diagnostic

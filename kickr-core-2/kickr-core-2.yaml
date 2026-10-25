@@ -1,0 +1,147 @@
+# Self-contained version for ESPHome Device Builder; no C++ files needed.
+substitutions:
+  name: pain-cave
+  friendly_name: Pain Cave
+  # Replace with your trainer's Bluetooth MAC address.
+  kickr_mac: "AA:BB:CC:DD:EE:FF"
+  # Optional: advertised trainer name for the MAC discovery log.
+  kickr_name: "KICKR CORE XXXX"
+
+packages:
+  esphome.bluetooth-proxy: github://esphome/bluetooth-proxies/esp32-generic/esp32-generic-c3.yaml@main
+
+esphome:
+  name: ${name}
+  name_add_mac_suffix: false
+  friendly_name: ${friendly_name}
+  min_version: 2026.10.0
+  on_boot:
+    priority: -100
+    then:
+      - binary_sensor.template.publish:
+          id: kickr_connected
+          state: false
+
+api:
+  encryption:
+    key: !secret api_encryption_key
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+
+esp32_ble:
+  max_connections: 3
+
+bluetooth_proxy:
+  active: true
+  connection_slots: 2
+
+esp32_ble_tracker:
+  on_ble_advertise:
+    - then:
+        - lambda: |-
+            static bool reported = false;
+            if (!reported && x.get_name() == "${kickr_name}") {
+              ESP_LOGI("kickr", "Trainer Bluetooth MAC: %s", x.address_str().c_str());
+              reported = true;
+            }
+
+ble_client:
+  - mac_address: ${kickr_mac}
+    id: kickr_client
+    on_connect:
+      then:
+        - binary_sensor.template.publish:
+            id: kickr_connected
+            state: true
+    on_disconnect:
+      then:
+        - binary_sensor.template.publish:
+            id: kickr_connected
+            state: false
+        - lambda: |-
+            id(kickr_power).publish_state(NAN);
+            id(kickr_cadence).publish_state(NAN);
+            id(kickr_heart_rate).publish_state(NAN);
+
+binary_sensor:
+  - platform: template
+    id: kickr_connected
+    name: KICKR connected
+    device_class: connectivity
+
+sensor:
+  - platform: ble_client
+    type: characteristic
+    ble_client_id: kickr_client
+    id: kickr_power
+    name: KICKR Power
+    service_uuid: "1818"
+    characteristic_uuid: "2A63"
+    notify: true
+    update_interval: never
+    unit_of_measurement: W
+    device_class: power
+    state_class: measurement
+    accuracy_decimals: 0
+    filters:
+      - timeout: 10s
+    lambda: |-
+      if (x.size() < 4) return NAN;
+      const uint16_t raw = uint16_t(x[2]) | (uint16_t(x[3]) << 8);
+      return raw <= 32767 ? float(raw) : float(int32_t(raw) - 65536);
+
+  - platform: ble_client
+    type: characteristic
+    ble_client_id: kickr_client
+    id: kickr_cadence
+    name: KICKR Cadence
+    service_uuid: "1826"
+    characteristic_uuid: "2AD2"
+    notify: true
+    update_interval: never
+    unit_of_measurement: rpm
+    icon: mdi:rotate-right
+    state_class: measurement
+    accuracy_decimals: 0
+    filters:
+      - timeout: 10s
+    lambda: |-
+      if (x.size() < 2) return NAN;
+      const uint16_t flags = uint16_t(x[0]) | (uint16_t(x[1]) << 8);
+      if (!(flags & 0x04)) return NAN;
+      size_t offset = 2;
+      if (!(flags & 0x01)) offset += 2;
+      if (flags & 0x02) offset += 2;
+      if (x.size() < offset + 2) return NAN;
+      const uint16_t raw = uint16_t(x[offset]) | (uint16_t(x[offset + 1]) << 8);
+      return raw / 2.0f;
+
+  - platform: ble_client
+    type: characteristic
+    ble_client_id: kickr_client
+    id: kickr_heart_rate
+    name: KICKR Heart rate
+    service_uuid: "180D"
+    characteristic_uuid: "2A37"
+    notify: true
+    update_interval: never
+    unit_of_measurement: bpm
+    icon: mdi:heart-pulse
+    state_class: measurement
+    accuracy_decimals: 0
+    filters:
+      - timeout: 10s
+    lambda: |-
+      if (x.size() < 2) return NAN;
+      const uint8_t flags = x[0];
+      const bool wide = (flags & 0x01) != 0;
+      size_t offset = wide ? 3 : 2;
+      if (x.size() < offset) return NAN;
+      if (flags & 0x08) offset += 2;
+      if (x.size() < offset) return NAN;
+      if ((flags & 0x10) && (x.size() < offset + 2 || (x.size() - offset) % 2 != 0))
+        return NAN;
+      if ((flags & 0x04) && !(flags & 0x02)) return NAN;
+      return wide ? uint16_t(x[1]) | (uint16_t(x[2]) << 8) : x[1];
